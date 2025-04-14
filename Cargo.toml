@@ -1,0 +1,15 @@
+[package]
+name = "kadesh"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.36", features = ["derive"] }
+notify = { version = "8.0.0", default-features = false, features = ["serde"] }
+notify-debouncer-full = "0.5.0"
+serde = { version = "1.0.219", features = ["derive"] }
+thiserror = "2.0.12"
+tokio = { version = "1.44.2", features = ["full"] }
+toml = "0.8.20"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
