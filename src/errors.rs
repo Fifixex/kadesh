@@ -49,10 +49,7 @@ pub enum AppError {
     AbsolutePath(PathBuf),
 
     #[error("Action command is empty for event {event_kind:?} in path {path}")]
-    EmptyCommand {
-        event_kind: String,
-        path: PathBuf,
-    },
+    EmptyCommand { event_kind: String, path: PathBuf },
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
