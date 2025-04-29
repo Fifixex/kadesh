@@ -4,7 +4,10 @@ mod errors;
 use crate::errors::{AppError, Result};
 
 use clap::Parser;
-use std::path::PathBuf;
+use config::load_config;
+use std::{path::PathBuf, sync::Arc};
+use tracing::{debug, info};
+use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -21,6 +24,30 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    println!("File config: {}!", args.config.to_string_lossy());
+
+    let config = match load_config(&args.config).await {
+        Ok(cfg) => Arc::new(cfg),
+        Err(e) => {
+            eprintln!("Error loading configuration: {}", e);
+
+            if let AppError::ConfigParse { path, source } = &e {
+                eprintln!(" -> Parsing error in: {:?}: {}", path, source);
+            } else if let AppError::ConfigRead { path, source } = &e {
+                eprintln!(" -> Reading error for {:?}: {}", path, source);
+            }
+            return Err(e);
+        }
+    };
+
+    let log_filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new(&config.log_level))
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(log_filter)
+        .with_span_events(FmtSpan::CLOSE)
+        .init();
+
+    info!("Logging initialized!");
+    debug!(config = ?config, "Loaded configuration");
     Ok(())
 }
