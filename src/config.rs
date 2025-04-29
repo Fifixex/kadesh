@@ -39,7 +39,6 @@ pub struct Action {
     pub command: String,
 }
 
-// TODO: implement this soon
 #[derive(Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct Filters {
@@ -90,4 +89,72 @@ pub async fn load_config(config_path: &Path) -> Result<Config> {
         warn!("Configuration file loaded, but no [[watch]] sections defined");
     }
     Ok(config)
+}
+
+impl Filters {
+    pub fn matches(&self, event: &notify::Event) -> bool {
+        if let Some(ref kinds) = self.event_kinds {
+            if !kinds.iter().any(|k| event_kind_matches(event.kind, k)) {
+                return false;
+            }
+        }
+
+        for path in &event.paths {
+            if self
+                .ignore_patterns
+                .iter()
+                .any(|pattern| path_matches_pattern(path, pattern))
+            {
+                tracing::trace!(?path, ?self.ignore_patterns, "Path matched ignore pattern, skipping.");
+                return false;
+            }
+            if let Some(ref exts) = self.extensions {
+                if let Some(ext) = path.extension().and_then(|os| os.to_str()) {
+                    let dot_ext = format!(".{}", ext);
+                    if !exts.contains(&dot_ext) {
+                        tracing::trace!(?path, ?exts, "Path extension mismatch, skipping.");
+                        return false;
+                    }
+                } else {
+                    tracing::trace!(
+                        ?path,
+                        ?exts,
+                        "Path has no extension, skipping due to extension filter."
+                    );
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+}
+
+fn path_matches_pattern(path: &Path, pattern: &str) -> bool {
+    path.to_str().map_or(false, |s| s.contains(pattern))
+}
+
+fn event_kind_matches(kind: EventKind, kind_str: &str) -> bool {
+    match kind_str.to_lowercase().as_str() {
+        "access" => kind.is_access(),
+        "create" => kind.is_create(),
+        "modify" | "write" => kind.is_modify() || kind.is_access(),
+        "remove" => kind.is_remove(),
+        _ => match kind {
+            EventKind::Modify(ModifyKind::Data(DataChange::Content))
+                if kind_str == "content_change" =>
+            {
+                true
+            }
+            EventKind::Modify(ModifyKind::Name(RenameMode::To)) if kind_str == "rename_to" => true,
+            EventKind::Modify(ModifyKind::Name(RenameMode::From)) if kind_str == "rename_from" => {
+                true
+            }
+            EventKind::Create(CreateKind::File) if kind_str == "create_file" => true,
+            EventKind::Create(CreateKind::Folder) if kind_str == "create_folder" => true,
+            EventKind::Remove(RemoveKind::File) if kind_str == "remove_file" => true,
+            EventKind::Remove(RemoveKind::Folder) if kind_str == "remove_folder" => true,
+            _ => false,
+        },
+    }
 }
