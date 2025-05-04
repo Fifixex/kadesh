@@ -5,7 +5,6 @@ use serde::Deserialize;
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    time::Duration,
 };
 use tracing::warn;
 
@@ -29,7 +28,7 @@ pub struct WatchConfig {
     #[serde(default)]
     pub actions: Vec<Action>,
     #[serde(default)]
-    pub filter: Filters,
+    pub filters: Filters,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -156,5 +155,17 @@ fn event_kind_matches(kind: EventKind, kind_str: &str) -> bool {
             EventKind::Remove(RemoveKind::Folder) if kind_str == "remove_folder" => true,
             _ => false,
         },
+    }
+}
+
+pub fn event_kind_to_primary_string(kind: EventKind) -> Option<&'static str> {
+    if kind.is_create() {
+        Some("create")
+    } else if kind.is_modify() || kind.is_access() {
+        Some("modify")
+    } else if kind.is_remove() {
+        Some("remove")
+    } else {
+        None
     }
 }

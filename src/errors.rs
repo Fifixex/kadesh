@@ -18,9 +18,6 @@ pub enum AppError {
         source: toml::de::Error,
     },
 
-    #[error("Configuration error: Invalid path specified: {0}")]
-    InvalidConfigPath(String),
-
     #[error("File System Watcher Error: {0}")]
     Notify(#[from] notify::Error),
 
@@ -41,12 +38,6 @@ pub enum AppError {
         path: String,
         source: shellexpand::LookupError<std::env::VarError>,
     },
-
-    #[error("Failed to send event for processing: {0}")]
-    EventSend(String),
-
-    #[error("Failed to get absolute path for: {0:?}")]
-    AbsolutePath(PathBuf),
 
     #[error("Action command is empty for event {event_kind:?} in path {path}")]
     EmptyCommand { event_kind: String, path: PathBuf },
