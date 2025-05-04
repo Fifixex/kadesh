@@ -4,9 +4,12 @@ mod errors;
 use crate::errors::{AppError, Result};
 
 use clap::Parser;
-use config::load_config;
-use std::{path::PathBuf, sync::Arc};
-use tracing::{debug, info};
+use config::{WatchConfig, load_config};
+use notify::{INotifyWatcher, RecursiveMode};
+use notify_debouncer_full::{DebounceEventResult, Debouncer, NoCache, new_debouncer};
+use std::{path::PathBuf, sync::Arc, time::Duration};
+use tokio::sync::mpsc;
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 
 #[derive(Parser, Debug)]
@@ -49,5 +52,66 @@ async fn main() -> Result<()> {
 
     info!("Logging initialized!");
     debug!(config = ?config, "Loaded configuration");
+
+    let (event_tx, mut event_rx) = mpsc::channel::<DebounceEventResult>(100);
+    let mut debouncer = new_debouncer(
+        Duration::from_millis(config.debounce_ms),
+        None,
+        move |result| {
+            let tx = event_tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = tx.send(result).await {
+                    error!("Failed to send debounced event: {}", e);
+                }
+            });
+        },
+    )
+    .map_err(AppError::Debounce)?;
+
+    for watch_config in &config.watches {
+        match setup_watch(&mut debouncer, watch_config) {
+            Ok(abs_path) => info!(
+              path = %abs_path.display(),
+              recursive = watch_config.recursive,
+              "Started watching"
+            ),
+            Err(e) => error!(
+              config_path = %watch_config.path,
+              error = %e,
+              "Failed to set up watch, skipping this entry"
+            ),
+        }
+    }
+
+    if config.watches.is_empty() {
+        warn!("No valid watch paths configured. Exiting.");
+        return Ok(());
+    }
+
+    info!("File system monitor started. Press Ctrl+C to stop.");
+
     Ok(())
+}
+
+fn setup_watch(
+    watcher: &mut Debouncer<INotifyWatcher, NoCache>,
+    watch_config: &WatchConfig,
+) -> Result<PathBuf> {
+    let path_to_watch = watch_config.expanded_absolute_path()?;
+
+    if !path_to_watch.exists() {
+        warn!(path = %path_to_watch.display(), "Watch path does not exist. It will watched if created later.");
+    } else if !path_to_watch.is_dir() && watch_config.recursive {
+        warn!(path = %path_to_watch.display(), "Recurisive wathc requested on a file, treating as non-recursive.");
+    }
+
+    let rec_mode = if watch_config.recursive && path_to_watch.is_dir() {
+        RecursiveMode::Recursive
+    } else {
+        RecursiveMode::NonRecursive
+    };
+
+    watcher.watch(&path_to_watch, rec_mode)?;
+
+    Ok(path_to_watch)
 }
