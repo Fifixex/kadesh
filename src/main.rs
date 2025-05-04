@@ -90,6 +90,15 @@ async fn main() -> Result<()> {
 
     info!("File system monitor started. Press Ctrl+C to stop.");
 
+    tokio::select! {
+      _ = tokio::signal::ctrl_c() => {
+            info!("Ctrl+C received. Shutting down...");
+        }
+    };
+
+    drop(debouncer);
+    info!("Watcher stopped. Exiting.");
+
     Ok(())
 }
 
