@@ -1,16 +1,20 @@
+mod actions;
 mod config;
 mod errors;
 
 use crate::errors::{AppError, Result};
 
 use clap::Parser;
-use config::{WatchConfig, load_config};
+use config::{WatchConfig, event_kind_to_primary_string, load_config};
 use notify::{INotifyWatcher, RecursiveMode};
-use notify_debouncer_full::{DebounceEventResult, Debouncer, NoCache, new_debouncer};
+use notify_debouncer_full::{
+    DebounceEventResult, DebouncedEvent, Debouncer, NoCache, new_debouncer,
+};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
-use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
+use tracing::{Instrument, debug, error, info, instrument, warn};
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::format::FmtSpan;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -54,12 +58,14 @@ async fn main() -> Result<()> {
     debug!(config = ?config, "Loaded configuration");
 
     let (event_tx, mut event_rx) = mpsc::channel::<DebounceEventResult>(100);
+    let runtime_handle = tokio::runtime::Handle::current();
     let mut debouncer = new_debouncer(
         Duration::from_millis(config.debounce_ms),
         None,
         move |result| {
             let tx = event_tx.clone();
-            tokio::spawn(async move {
+            let handle = runtime_handle.clone();
+            handle.spawn(async move {
                 if let Err(e) = tx.send(result).await {
                     error!("Failed to send debounced event: {}", e);
                 }
@@ -90,10 +96,37 @@ async fn main() -> Result<()> {
 
     info!("File system monitor started. Press Ctrl+C to stop.");
 
+    let config_clone = Arc::clone(&config);
+    let event_processor = tokio::spawn(async move {
+        while let Some(result) = event_rx.recv().await {
+            match result {
+                Ok(events) => {
+                    for event in events {
+                        let cfg = Arc::clone(&config_clone);
+                        tokio::spawn(
+                            process_event(event, cfg)
+                                .instrument(tracing::info_span!("process_event")),
+                        );
+                    }
+                }
+                Err(errors) => {
+                    for error in errors {
+                        error!(error = %error, "Debouncer error");
+                    }
+                }
+            }
+        }
+        info!("Event processing loop finished.");
+    });
+
     tokio::select! {
       _ = tokio::signal::ctrl_c() => {
             info!("Ctrl+C received. Shutting down...");
         }
+      _ = event_processor => {
+        warn!("Event processor task completed unexpectedly.");
+
+      }
     };
 
     drop(debouncer);
@@ -123,4 +156,60 @@ fn setup_watch(
     watcher.watch(&path_to_watch, rec_mode)?;
 
     Ok(path_to_watch)
+}
+
+#[instrument(skip(event, config), fields(kind = ?event.kind, paths = ?event.paths))]
+async fn process_event(event: DebouncedEvent, config: Arc<config::Config>) {
+    debug!("Processing event");
+
+    for watch_config in &config.watches {
+        let is_relevant = event
+            .paths
+            .iter()
+            .any(|p| match watch_config.expanded_absolute_path() {
+                Ok(watch_root) => p.starts_with(&watch_root),
+                Err(_) => false,
+            });
+
+        if !is_relevant {
+            continue;
+        }
+
+        if !watch_config.filters.matches(&event) {
+            debug!(config_path = %watch_config.path, "Event filtered out");
+            continue;
+        }
+
+        let primary_kind_str = event_kind_to_primary_string(event.kind);
+
+        for action in &watch_config.actions {
+            let action_event_str = action.event.to_lowercase();
+            let mut matched = false;
+
+            if action_event_str == "any" {
+                matched = true;
+            } else if let Some(primary_kind) = primary_kind_str {
+                if action_event_str == primary_kind {
+                    matched = true;
+                }
+            }
+
+            if matched {
+                if action.command.trim().is_empty() {
+                    warn!(event = %action.event, config_path = %watch_config.path, "Action has empty command, skipping.");
+                    continue;
+                }
+                for path in &event.paths {
+                    let cmd = action.command.clone();
+                    let p = path.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = actions::execute_action(&cmd, &p).await {
+                            error!(command = %cmd, path = %p.display(), error = %e, "Action execution failed");
+                        }
+                    }.instrument(tracing::info_span!("execute_action", command = %action.command)));
+                }
+                break;
+            }
+        }
+    }
 }
